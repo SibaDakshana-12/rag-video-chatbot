@@ -55,6 +55,7 @@ def get_youtube_data(url):
         "upload_date": info.get("upload_date", ""),
         "hashtags": info.get("tags", [])[:5],
         "transcript": transcript,
+        "hook": transcript[:500],
         "engagement_rate": round(((likes + comments) / max(views, 1)) * 100, 2)
     }
 
@@ -83,6 +84,7 @@ def get_instagram_data(url):
             "upload_date": info.get("upload_date", ""),
             "hashtags": info.get("tags", [])[:5],
             "transcript": transcript,
+            "hook": transcript[:500],
             "engagement_rate": round(((likes + comments) / max(views, 1)) * 100, 2)
         }
 
@@ -108,6 +110,7 @@ def get_instagram_data(url):
             "upload_date": "20240101",
             "hashtags": ["reels", "viral", "trending"],
             "transcript": transcript,
+            "hook": transcript[:500],
             "engagement_rate": round(((likes + comments) / max(views, 1)) * 100, 2),
             "data_source": "estimated"
         }
@@ -154,6 +157,7 @@ def chunk_and_embed(video_data, session_id="default"):
         "likes": video_data["likes"],
         "comments": video_data["comments"],
         "followers": video_data["followers"],
+        "hook": video_data.get("hook", "")[:200],
     } for i, chunk in enumerate(chunks)]
 
     vectorstore = get_vectorstore(session_id)
@@ -224,6 +228,7 @@ Video Metadata:
 class IngestRequest(BaseModel):
     youtube_url: str
     instagram_url: str
+    session_id: str = "default"
 
 class ChatRequest(BaseModel):
     message: str
@@ -231,7 +236,7 @@ class ChatRequest(BaseModel):
 
 @app.post("/ingest")
 async def ingest(request: IngestRequest):
-    session_id = "default"
+    session_id = request.session_id
     session = get_session(session_id)
 
     try:
