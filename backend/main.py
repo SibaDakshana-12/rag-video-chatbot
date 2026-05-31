@@ -87,7 +87,10 @@ def get_instagram_data(url):
         }
 
     except Exception:
-        transcript = f"Instagram reel from {url}. Content discusses social media engagement strategies, trending topics, and creator tips. The video uses strong hooks, trending audio, and clear call to action."
+        # Instagram blocks automated scraping without OAuth
+        # Using estimated fallback data — clearly labeled
+        # Production fix: use Instagram Graph API with OAuth tokens
+        transcript = f"[ESTIMATED DATA - Instagram blocked automated access] Instagram reel from {url}. Content discusses social media engagement strategies, trending topics, and creator tips. The video uses strong hooks, trending audio, and clear call to action."
         views    = 50000
         likes    = 3200
         comments = 180
@@ -95,7 +98,7 @@ def get_instagram_data(url):
             "video_id": "B",
             "platform": "instagram",
             "url": url,
-            "title": "Instagram Reel",
+            "title": "Instagram Reel [Estimated Data]",
             "creator": url.split("/")[-2] if "/" in url else "Instagram Creator",
             "views": views,
             "likes": likes,
@@ -105,27 +108,34 @@ def get_instagram_data(url):
             "upload_date": "20240101",
             "hashtags": ["reels", "viral", "trending"],
             "transcript": transcript,
-            "engagement_rate": round(((likes + comments) / max(views, 1)) * 100, 2)
+            "engagement_rate": round(((likes + comments) / max(views, 1)) * 100, 2),
+            "data_source": "estimated"
         }
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma
 
-def get_embeddings():
-    return GoogleGenerativeAIEmbeddings(
-        model="gemini-embedding-001",
-        google_api_key=os.getenv("GOOGLE_API_KEY")
-    )
+# Initialize embeddings ONCE at startup — not on every request
+_embeddings = None
 
-def get_vectorstore():
+def get_embeddings_cached():
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = GoogleGenerativeAIEmbeddings(
+            model="gemini-embedding-001",
+            google_api_key=os.getenv("GOOGLE_API_KEY")
+        )
+    return _embeddings
+
+def get_vectorstore(session_id="default"):
     return Chroma(
-        collection_name="videos",
-        embedding_function=get_embeddings(),
+        collection_name=f"videos_{session_id}",
+        embedding_function=get_embeddings_cached(),
         persist_directory="./chroma_db"
     )
 
-def chunk_and_embed(video_data):
+def chunk_and_embed(video_data, session_id="default"):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=500,
         chunk_overlap=100,
@@ -146,7 +156,7 @@ def chunk_and_embed(video_data):
         "followers": video_data["followers"],
     } for i, chunk in enumerate(chunks)]
 
-    vectorstore = get_vectorstore()
+    vectorstore = get_vectorstore(session_id)
     vectorstore.add_texts(texts=chunks, metadatas=metadatas)
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -155,18 +165,26 @@ from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
-video_store = {}
-chat_history = []
+# Session based storage — supports multiple users simultaneously
+sessions = {}
+
+def get_session(session_id="default"):
+    if session_id not in sessions:
+        sessions[session_id] = {
+            "video_store": {},
+            "chat_history": []
+        }
+    return sessions[session_id]
 
 def format_docs(docs):
     formatted = []
     for doc in docs:
         vid_id = doc.metadata.get("video_id", "?")
         chunk_idx = doc.metadata.get("chunk_index", 0)
-        formatted.append(f"[Video {vid_id} - Chunk {chunk_idx}]:\n{doc.page_content}")
+        formatted.append(f"[Source: Video {vid_id} - Chunk {chunk_idx}]:\n{doc.page_content}")
     return "\n\n".join(formatted)
 
-def get_chain():
+def get_chain(session_id="default"):
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         google_api_key=os.getenv("GOOGLE_API_KEY"),
@@ -174,12 +192,12 @@ def get_chain():
         streaming=True
     )
 
-    retriever = get_vectorstore().as_retriever(search_kwargs={"k": 4})
+    retriever = get_vectorstore(session_id).as_retriever(search_kwargs={"k": 4})
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are an expert social media analyst helping creators understand their video performance.
 You have access to transcripts and metadata for two videos (A and B).
-Always cite which video and chunk your answer comes from.
+Always cite which video and chunk your answer comes from using [Source: Video X - Chunk Y] format.
 Be specific, data-driven, and actionable in your responses.
 
 Retrieved transcript chunks:
@@ -209,13 +227,25 @@ class IngestRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: str = "default"
 
 @app.post("/ingest")
 async def ingest(request: IngestRequest):
-    global video_store, chat_history
+    session_id = "default"
+    session = get_session(session_id)
+
     try:
-        video_store = {}
-        chat_history = []
+        session["video_store"] = {}
+        session["chat_history"] = []
+
+        # Delete old chroma collection before new ingest
+        # prevents retrieval pollution from previous sessions
+        try:
+            import chromadb
+            client = chromadb.PersistentClient(path="./chroma_db")
+            client.delete_collection(f"videos_{session_id}")
+        except Exception:
+            pass
 
         print("Fetching YouTube data...")
         video_a = get_youtube_data(request.youtube_url)
@@ -225,14 +255,14 @@ async def ingest(request: IngestRequest):
         video_b = get_instagram_data(request.instagram_url)
         video_b["video_id"] = "B"
 
-        video_store["A"] = video_a
-        video_store["B"] = video_b
+        session["video_store"]["A"] = video_a
+        session["video_store"]["B"] = video_b
 
         print("Embedding Video A...")
-        chunk_and_embed(video_a)
+        chunk_and_embed(video_a, session_id)
 
         print("Embedding Video B...")
-        chunk_and_embed(video_b)
+        chunk_and_embed(video_b, session_id)
 
         print("Done!")
 
@@ -264,14 +294,15 @@ async def ingest(request: IngestRequest):
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    global chat_history
+    session_id = request.session_id
+    session = get_session(session_id)
 
     async def generate():
         try:
-            chain, retriever = get_chain()
+            chain, retriever = get_chain(session_id)
 
-            a = video_store.get("A", {})
-            b = video_store.get("B", {})
+            a = session["video_store"].get("A", {})
+            b = session["video_store"].get("B", {})
             metadata = f"""Video A: "{a.get('title','')}" by {a.get('creator','')}
 Views: {a.get('views',0)} | Likes: {a.get('likes',0)} | Comments: {a.get('comments',0)} | Followers: {a.get('followers',0)} | Engagement: {a.get('engagement_rate',0)}%
 
@@ -296,15 +327,15 @@ Views: {b.get('views',0)} | Likes: {b.get('likes',0)} | Comments: {b.get('commen
             full_answer = ""
             async for chunk in chain.astream({
                 "question": request.message,
-                "chat_history": chat_history,
+                "chat_history": session["chat_history"],
                 "metadata": metadata
             }):
                 if isinstance(chunk, str) and chunk:
                     full_answer += chunk
                     yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
 
-            chat_history.append(HumanMessage(content=request.message))
-            chat_history.append(AIMessage(content=full_answer))
+            session["chat_history"].append(HumanMessage(content=request.message))
+            session["chat_history"].append(AIMessage(content=full_answer))
 
             yield f"data: {json.dumps({'type': 'citations', 'content': citations})}\n\n"
             yield "data: [DONE]\n\n"
