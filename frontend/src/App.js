@@ -56,7 +56,9 @@ function VideoCard({ data, label, badgeClass }) {
 
       <div className="engagement">
         <div className="label">Engagement Rate</div>
-        <div className="value">{data.engagement_rate}%</div>
+        <div className="value">
+          {data.views === 0 ? "N/A (views restricted)" : `${data.engagement_rate}%`}
+        </div>
       </div>
 
       {data.hashtags && data.hashtags.length > 0 && (

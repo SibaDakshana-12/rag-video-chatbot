@@ -135,7 +135,6 @@ def get_vectorstore(session_id="default"):
     return Chroma(
         collection_name=f"videos_{session_id}",
         embedding_function=get_embeddings_cached(),
-        persist_directory="./chroma_db"
     )
 
 def chunk_and_embed(video_data, session_id="default"):
