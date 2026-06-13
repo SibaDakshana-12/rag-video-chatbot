@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import './App.css';
 
-const API = 'http://127.0.0.1:8000';
+const API = 'https://rag-video-chatbot-mlvf.onrender.com';
 
 const QUICK_QUESTIONS = [
   "What is the engagement rate of each video?",
